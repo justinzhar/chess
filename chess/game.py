@@ -60,6 +60,17 @@ class ChessGame:
             self.network_client.on_opponent_disconnect = self._on_opponent_disconnect
             self.network_client.on_opponent_resign = self._on_opponent_resign
     
+    @property
+    def board_flipped(self):
+        """Return True if board should be flipped (black's perspective)."""
+        return self.game_mode == 'online' and self.player_color == 'black'
+    
+    def flip_coords(self, row, col):
+        """Flip board coordinates if viewing from black's perspective."""
+        if self.board_flipped:
+            return (7 - row, 7 - col)
+        return (row, col)
+    
     def update_dimensions(self):
         """Update dimensions based on current screen size."""
         self.width = self.screen.get_width()
@@ -171,7 +182,8 @@ class ChessGame:
             self.board_y <= y < self.board_y + self.board_size):
             col = (x - self.board_x) // self.square_size
             row = (y - self.board_y) // self.square_size
-            return (row, col)
+            # Flip for black's perspective
+            return self.flip_coords(row, col)
         return None
     
     def handle_click(self, pos):
@@ -276,6 +288,13 @@ class ChessGame:
             self.pending_opponent_move = None
             # Apply opponent's move directly (don't send back to server)
             from_row, from_col, to_row, to_col = move
+            
+            # Validate that there's a piece to move
+            piece = self.board.get_piece(from_row, from_col)
+            if piece is None:
+                print(f"Warning: No piece at ({from_row}, {from_col}) for opponent move")
+                return
+            
             is_capture = self.board.make_move(from_row, from_col, to_row, to_col)
             
             if is_capture and 'capture' in self.sounds:
@@ -337,7 +356,7 @@ class ChessGame:
         if self.last_move:
             for pos in [(self.last_move[0], self.last_move[1]), 
                        (self.last_move[2], self.last_move[3])]:
-                row, col = pos
+                row, col = self.flip_coords(pos[0], pos[1])
                 highlight = pygame.Surface((self.square_size, self.square_size), pygame.SRCALPHA)
                 highlight.fill((180, 160, 80, 70))  # Golden highlight
                 self.screen.blit(highlight, 
@@ -353,13 +372,14 @@ class ChessGame:
                 pulse = (math.sin(self.time * 6) + 1) / 2
                 alpha = int(60 + 60 * pulse)
                 check_surface.fill((255, 80, 80, alpha))
+                draw_row, draw_col = self.flip_coords(king_pos[0], king_pos[1])
                 self.screen.blit(check_surface,
-                               (self.board_x + king_pos[1] * self.square_size,
-                                self.board_y + king_pos[0] * self.square_size))
+                               (self.board_x + draw_col * self.square_size,
+                                self.board_y + draw_row * self.square_size))
         
         # Highlight selected square
         if self.selected_square:
-            row, col = self.selected_square
+            row, col = self.flip_coords(self.selected_square[0], self.selected_square[1])
             highlight = pygame.Surface((self.square_size, self.square_size), pygame.SRCALPHA)
             highlight.fill(SELECTED_COLOR)
             self.screen.blit(highlight,
@@ -368,12 +388,13 @@ class ChessGame:
         
         # Highlight valid moves
         for move in self.valid_moves:
-            row, col = move
-            x = self.board_x + col * self.square_size
-            y = self.board_y + row * self.square_size
+            logical_row, logical_col = move
+            draw_row, draw_col = self.flip_coords(logical_row, logical_col)
+            x = self.board_x + draw_col * self.square_size
+            y = self.board_y + draw_row * self.square_size
             move_surface = pygame.Surface((self.square_size, self.square_size), pygame.SRCALPHA)
             
-            if self.board.get_piece(row, col) is not None or move == self.board.en_passant_target:
+            if self.board.get_piece(logical_row, logical_col) is not None or move == self.board.en_passant_target:
                 # Capture indicator - ring around edge
                 pygame.draw.circle(move_surface, CAPTURE_MOVE_COLOR,
                                  (self.square_size // 2, self.square_size // 2),
@@ -394,13 +415,15 @@ class ChessGame:
         # Coordinate labels
         label_color = (100, 100, 110)
         for i in range(8):
-            # Rank numbers (1-8)
-            rank_label = self.small_font.render(str(8 - i), True, label_color)
+            # Rank numbers (1-8) - flip for black
+            rank_num = (i + 1) if self.board_flipped else (8 - i)
+            rank_label = self.small_font.render(str(rank_num), True, label_color)
             self.screen.blit(rank_label,
                            (self.board_x - 18, self.board_y + i * self.square_size + self.square_size // 3))
             
-            # File letters (a-h)
-            file_label = self.small_font.render(chr(ord('a') + i), True, label_color)
+            # File letters (a-h) - flip for black
+            file_idx = (7 - i) if self.board_flipped else i
+            file_label = self.small_font.render(chr(ord('a') + file_idx), True, label_color)
             self.screen.blit(file_label,
                            (self.board_x + i * self.square_size + self.square_size // 2 - 4,
                             self.board_y + self.board_size + 5))
@@ -414,8 +437,10 @@ class ChessGame:
                     image_key = f"{piece.color}_{piece.get_name()}"
                     if image_key in self.scaled_images:
                         image = self.scaled_images[image_key]
-                        base_x = self.board_x + col * self.square_size + (self.square_size - image.get_width()) // 2
-                        base_y = self.board_y + row * self.square_size + (self.square_size - image.get_height()) // 2
+                        # Flip coordinates for black's perspective
+                        draw_row, draw_col = self.flip_coords(row, col)
+                        base_x = self.board_x + draw_col * self.square_size + (self.square_size - image.get_width()) // 2
+                        base_y = self.board_y + draw_row * self.square_size + (self.square_size - image.get_height()) // 2
                         
                         # Check if this is the fallen king
                         if (self.fallen_king_pos and 
