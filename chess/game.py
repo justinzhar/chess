@@ -13,11 +13,39 @@ from constants import (
     WHITE, BLACK
 )
 from board import Board
-from ai import ChessAI
+from ai import ChessAI, PIECE_VALUES, PIECE_TABLES
 
 # Themed board colors - dark slate
 BOARD_LIGHT = (140, 135, 145)   # Slate gray
 BOARD_DARK = (55, 50, 65)       # Deep charcoal purple
+
+
+def evaluate_position(board):
+    """Evaluate the board position. Positive = good for white."""
+    score = 0
+    
+    for row in range(8):
+        for col in range(8):
+            piece = board.get_piece(row, col)
+            if piece is not None:
+                # Base piece value
+                value = PIECE_VALUES[piece.piece_type]
+                
+                # Position bonus
+                table = PIECE_TABLES.get(piece.piece_type)
+                if table:
+                    if piece.color == WHITE:
+                        value += table[row][col]
+                    else:
+                        value += table[7 - row][col]
+                
+                # Add for white, subtract for black
+                if piece.color == WHITE:
+                    score += value
+                else:
+                    score -= value
+    
+    return score
 
 
 class ChessGame:
@@ -53,12 +81,17 @@ class ChessGame:
         # Online mode state
         self.opponent_disconnected = False
         self.pending_opponent_move = None
+        self.rematch_requested = False
+        self.opponent_wants_rematch = False
+        self.rematch_pending = False
         
         # Set up network callbacks for online mode
         if self.network_client:
             self.network_client.on_opponent_move = self._on_opponent_move
             self.network_client.on_opponent_disconnect = self._on_opponent_disconnect
             self.network_client.on_opponent_resign = self._on_opponent_resign
+            self.network_client.on_rematch_requested = self._on_rematch_requested
+            self.network_client.on_rematch_start = self._on_rematch_start
     
     @property
     def board_flipped(self):
@@ -153,6 +186,8 @@ class ChessGame:
         self.winner = None
         self.in_check = False
         self.move_history = []
+        self.evaluation_history = []  # Track evaluation after each move
+        self.current_eval = 0  # Current position evaluation
         self.selected_square = None
         self.valid_moves = []
         self.last_move = None
@@ -236,6 +271,11 @@ class ChessGame:
         
         self.last_move = (from_row, from_col, to_row, to_col)
         self.move_history.append(self.last_move)
+        
+        # Calculate and store evaluation
+        self.current_eval = evaluate_position(self.board)
+        self.evaluation_history.append(self.current_eval)
+        
         self.current_turn = BLACK if self.current_turn == WHITE else WHITE
         self.in_check = self.board.is_in_check(self.current_turn)
         self.check_game_over()
@@ -281,8 +321,26 @@ class ChessGame:
         my_color = 'White' if self.player_color == 'white' else 'Black'
         self.game_result = f"Opponent resigned! {my_color} wins!"
     
+    def _on_rematch_requested(self):
+        """Callback when opponent requests a rematch."""
+        self.opponent_wants_rematch = True
+    
+    def _on_rematch_start(self, new_color):
+        """Callback when rematch is confirmed and starting."""
+        self.player_color = new_color
+        self.rematch_pending = True
+    
     def update_online(self):
         """Handle incoming opponent moves in online mode."""
+        # Check for rematch start
+        if self.rematch_pending:
+            self.rematch_pending = False
+            self.reset_game()
+            # Update the board flip based on new color
+            self.rematch_requested = False
+            self.opponent_wants_rematch = False
+            return
+        
         if self.pending_opponent_move and not self.game_over:
             move = self.pending_opponent_move
             self.pending_opponent_move = None
@@ -304,6 +362,11 @@ class ChessGame:
             
             self.last_move = (from_row, from_col, to_row, to_col)
             self.move_history.append(self.last_move)
+            
+            # Calculate and store evaluation
+            self.current_eval = evaluate_position(self.board)
+            self.evaluation_history.append(self.current_eval)
+            
             self.current_turn = BLACK if self.current_turn == WHITE else WHITE
             self.in_check = self.board.is_in_check(self.current_turn)
             self.check_game_over()
@@ -520,6 +583,28 @@ class ChessGame:
         if self.game_over:
             result_surface = self.font.render(self.game_result, True, (100, 200, 120))
             self.screen.blit(result_surface, (content_x, y_offset))
+            
+            # Show rematch UI for online mode
+            if self.game_mode == 'online' and not self.opponent_disconnected:
+                y_offset += 40
+                if self.rematch_requested and self.opponent_wants_rematch:
+                    rematch_text = "Rematch starting..."
+                    rematch_color = (100, 200, 100)
+                elif self.rematch_requested:
+                    rematch_text = "Waiting for opponent..."
+                    rematch_color = (180, 180, 100)
+                elif self.opponent_wants_rematch:
+                    rematch_text = "Opponent wants rematch!"
+                    rematch_color = (100, 180, 255)
+                    y_offset2 = y_offset + 25
+                    accept_text = self.small_font.render("Press Y to accept", True, (100, 180, 255))
+                    self.screen.blit(accept_text, (content_x, y_offset2))
+                else:
+                    rematch_text = "Press Y for rematch"
+                    rematch_color = (150, 150, 160)
+                
+                rematch_surface = self.font.render(rematch_text, True, rematch_color)
+                self.screen.blit(rematch_surface, (content_x, y_offset))
         else:
             turn_text = f"{self.current_turn.capitalize()}'s Turn"
             turn_surface = self.title_font.render(turn_text, True, (255, 255, 255))
@@ -541,36 +626,97 @@ class ChessGame:
         # Divider
         pygame.draw.line(self.screen, (50, 48, 60),
                         (content_x, y_offset), (self.panel_x + self.panel_width - padding, y_offset), 1)
-        y_offset += 20
+        y_offset += 15
+        
+        # Evaluation bar
+        eval_label = self.small_font.render("Evaluation", True, (140, 135, 150))
+        self.screen.blit(eval_label, (content_x, y_offset))
+        
+        # Format eval score (convert centipawns to pawns)
+        eval_pawns = self.current_eval / 100.0
+        if abs(eval_pawns) >= 10:
+            eval_text = f"+{int(eval_pawns)}" if eval_pawns > 0 else f"{int(eval_pawns)}"
+        else:
+            eval_text = f"+{eval_pawns:.1f}" if eval_pawns > 0 else f"{eval_pawns:.1f}"
+        eval_color = (120, 200, 120) if eval_pawns >= 0 else (200, 120, 120)
+        eval_score_surface = self.small_font.render(eval_text, True, eval_color)
+        self.screen.blit(eval_score_surface, (content_x + 80, y_offset))
+        y_offset += 22
+        
+        # Evaluation bar visual
+        bar_width = self.panel_width - padding * 2
+        bar_height = 12
+        bar_x = content_x
+        
+        # Background (black side)
+        pygame.draw.rect(self.screen, (40, 40, 45), (bar_x, y_offset, bar_width, bar_height), border_radius=3)
+        
+        # Calculate white's portion (0.5 = equal, clamped between 0 and 1)
+        # Use sigmoid-like scaling for large advantages
+        clamped_eval = max(-1000, min(1000, self.current_eval))
+        white_portion = 0.5 + (clamped_eval / 2000.0)
+        white_width = int(bar_width * white_portion)
+        
+        # White bar
+        if white_width > 0:
+            pygame.draw.rect(self.screen, (220, 220, 225), (bar_x, y_offset, white_width, bar_height), border_radius=3)
+        
+        # Center line
+        center_x = bar_x + bar_width // 2
+        pygame.draw.line(self.screen, (100, 100, 110), (center_x, y_offset), (center_x, y_offset + bar_height), 2)
+        
+        y_offset += 25
         
         # Move history header
         history_label = self.small_font.render("Move History", True, (140, 135, 150))
         self.screen.blit(history_label, (content_x, y_offset))
         y_offset += 25
         
-        # Move history
+        # Move history with evaluations
         max_moves = (self.panel_height - y_offset - 100) // 22
         start_idx = max(0, len(self.move_history) - max_moves)
         
         for i, move in enumerate(self.move_history[start_idx:]):
-            move_num = start_idx + i + 1
+            actual_idx = start_idx + i
+            move_num = actual_idx + 1
             from_sq = f"{chr(ord('a') + move[1])}{8 - move[0]}"
             to_sq = f"{chr(ord('a') + move[3])}{8 - move[2]}"
-            move_text = f"{move_num}. {from_sq} - {to_sq}"
             
-            is_white_move = (start_idx + i) % 2 == 0
+            # Get evaluation for this move
+            if actual_idx < len(self.evaluation_history):
+                move_eval = self.evaluation_history[actual_idx] / 100.0
+                if abs(move_eval) >= 10:
+                    eval_str = f"+{int(move_eval)}" if move_eval > 0 else f"{int(move_eval)}"
+                else:
+                    eval_str = f"+{move_eval:.1f}" if move_eval > 0 else f"{move_eval:.1f}"
+            else:
+                eval_str = ""
+            
+            move_text = f"{move_num}. {from_sq}-{to_sq}"
+            
+            is_white_move = actual_idx % 2 == 0
             color = (220, 220, 225) if is_white_move else (140, 140, 150)
             move_surface = self.small_font.render(move_text, True, color)
             self.screen.blit(move_surface, (content_x, y_offset))
+            
+            # Draw evaluation next to move
+            if eval_str:
+                eval_color = (100, 180, 100) if move_eval >= 0 else (180, 100, 100)
+                eval_surface = self.small_font.render(eval_str, True, eval_color)
+                self.screen.blit(eval_surface, (content_x + 95, y_offset))
+            
             y_offset += 22
         
-        # Controls at bottom
+        # Controls at bottom - different for online mode
         controls_y = self.panel_y + self.panel_height - 60
         pygame.draw.line(self.screen, (50, 48, 60),
                         (content_x, controls_y - 10),
                         (self.panel_x + self.panel_width - padding, controls_y - 10), 1)
         
-        controls = ["R: Restart", "ESC: Menu", "F11: Fullscreen"]
+        if self.game_mode == 'online':
+            controls = ["Y: Rematch", "ESC: Menu", "F11: Fullscreen"]
+        else:
+            controls = ["R: Restart", "ESC: Menu", "F11: Fullscreen"]
         for i, ctrl in enumerate(controls):
             ctrl_surface = self.small_font.render(ctrl, True, (100, 95, 110))
             self.screen.blit(ctrl_surface, (content_x, controls_y + i * 18))
@@ -636,8 +782,13 @@ class ChessGame:
                         self.handle_click(event.pos)
                 
                 elif event.type == pygame.KEYDOWN:
-                    if event.key == pygame.K_r:
+                    if event.key == pygame.K_r and self.game_mode != 'online':
                         self.reset_game()
+                    elif event.key == pygame.K_y and self.game_mode == 'online' and self.game_over:
+                        # Request rematch
+                        if not self.rematch_requested and self.network_client:
+                            self.rematch_requested = True
+                            self.network_client.request_rematch()
                     elif event.key == pygame.K_ESCAPE:
                         return True  # Go to menu
                     elif event.key == pygame.K_F11:

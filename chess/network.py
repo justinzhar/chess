@@ -41,6 +41,8 @@ class NetworkClient:
         self.on_opponent_resign = None
         self.on_waiting = None
         self.on_error = None
+        self.on_rematch_requested = None
+        self.on_rematch_start = None
         
         self._running = False
         self._thread = None
@@ -139,6 +141,16 @@ class NetworkClient:
         elif msg_type == 'opponent_resigned':
             if self.on_opponent_resign:
                 self.on_opponent_resign()
+        
+        elif msg_type == 'rematch_requested':
+            if self.on_rematch_requested:
+                self.on_rematch_requested()
+        
+        elif msg_type == 'rematch_start':
+            self.game_id = data.get('game_id')
+            self.player_color = data.get('color')
+            if self.on_rematch_start:
+                self.on_rematch_start(self.player_color)
     
     def send_move(self, from_row, from_col, to_row, to_col):
         """Send a move to the server."""
@@ -162,4 +174,11 @@ class NetworkClient:
         self.outgoing_queue.put({
             'action': 'find_match',
             'name': 'Player'
+        })
+    
+    def request_rematch(self):
+        """Request a rematch with the current opponent."""
+        self.outgoing_queue.put({
+            'action': 'rematch_request',
+            'game_id': self.game_id
         })

@@ -105,6 +105,62 @@ async def websocket_handler(request):
                             del player_games[opponent_ws]
                         del games[game_id]
                         del player_games[ws]
+                
+                elif action == 'rematch_request':
+                    # Player wants a rematch
+                    game_id = data.get('game_id')
+                    player_info = player_games.get(ws)
+                    if player_info:
+                        game_id = player_info['game_id']
+                        if game_id in games:
+                            game = games[game_id]
+                            player_color = player_info['color']
+                            opponent_color = 'black' if player_color == 'white' else 'white'
+                            opponent_ws = game['players'].get(opponent_color)
+                            
+                            # Mark this player as wanting rematch
+                            game.setdefault('rematch_requests', set()).add(player_color)
+                            
+                            # Notify opponent
+                            if opponent_ws and not opponent_ws.closed:
+                                await opponent_ws.send_json({
+                                    'type': 'rematch_requested'
+                                })
+                            
+                            # Check if both players want rematch
+                            if len(game.get('rematch_requests', set())) >= 2:
+                                # Both want rematch - swap colors and start new game
+                                new_game_id = f"game_{len(games)}"
+                                # Swap colors
+                                new_white = game['players']['black']
+                                new_black = game['players']['white']
+                                
+                                games[new_game_id] = {
+                                    'players': {
+                                        'white': new_white,
+                                        'black': new_black
+                                    },
+                                    'current_turn': 'white'
+                                }
+                                
+                                # Update player tracking
+                                player_games[new_white] = {'game_id': new_game_id, 'color': 'white'}
+                                player_games[new_black] = {'game_id': new_game_id, 'color': 'black'}
+                                
+                                # Notify both players
+                                await new_white.send_json({
+                                    'type': 'rematch_start',
+                                    'game_id': new_game_id,
+                                    'color': 'white'
+                                })
+                                await new_black.send_json({
+                                    'type': 'rematch_start',
+                                    'game_id': new_game_id,
+                                    'color': 'black'
+                                })
+                                
+                                # Clean up old game
+                                del games[game_id]
                         
             elif msg.type == aiohttp.WSMsgType.ERROR:
                 print(f'WebSocket error: {ws.exception()}')
