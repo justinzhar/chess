@@ -8,6 +8,9 @@ import json
 import threading
 import queue
 
+# Server URL - Update this with your Railway deployment URL
+SERVER_URL = "wss://chess-production-dc4e.up.railway.app/ws"
+
 # Try to import websockets (will need to be installed)
 try:
     import websockets
