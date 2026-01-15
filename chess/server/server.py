@@ -13,6 +13,7 @@ import aiohttp
 games = {}  # game_id -> {players: [], board_state: ..., current_turn: ...}
 waiting_player = None  # WebSocket of player waiting for match
 waiting_player_info = None
+player_games = {}  # ws -> {game_id, color} - track game info for each player
 
 
 async def websocket_handler(request):
@@ -21,9 +22,6 @@ async def websocket_handler(request):
     
     ws = web.WebSocketResponse()
     await ws.prepare(request)
-    
-    player_game_id = None
-    player_color = None
     
     try:
         async for msg in ws:
@@ -52,6 +50,10 @@ async def websocket_handler(request):
                             'current_turn': 'white'
                         }
                         
+                        # Track game info for both players
+                        player_games[waiting_player] = {'game_id': game_id, 'color': 'white'}
+                        player_games[ws] = {'game_id': game_id, 'color': 'black'}
+                        
                         # Notify both players
                         await waiting_player.send_json({
                             'type': 'game_start',
@@ -66,9 +68,6 @@ async def websocket_handler(request):
                             'opponent': waiting_player_info
                         })
                         
-                        player_game_id = game_id
-                        player_color = 'black'
-                        
                         # Clear waiting player
                         waiting_player = None
                         waiting_player_info = None
@@ -76,8 +75,10 @@ async def websocket_handler(request):
                 elif action == 'move':
                     # Player made a move
                     game_id = data.get('game_id')
-                    if game_id in games:
+                    player_info = player_games.get(ws)
+                    if game_id in games and player_info:
                         game = games[game_id]
+                        player_color = player_info['color']
                         # Send move to opponent
                         opponent_color = 'black' if player_color == 'white' else 'white'
                         opponent_ws = game['players'].get(opponent_color)
@@ -89,15 +90,21 @@ async def websocket_handler(request):
                 
                 elif action == 'resign':
                     game_id = data.get('game_id')
-                    if game_id in games:
+                    player_info = player_games.get(ws)
+                    if game_id in games and player_info:
                         game = games[game_id]
+                        player_color = player_info['color']
                         opponent_color = 'black' if player_color == 'white' else 'white'
                         opponent_ws = game['players'].get(opponent_color)
                         if opponent_ws and not opponent_ws.closed:
                             await opponent_ws.send_json({
                                 'type': 'opponent_resigned'
                             })
+                        # Cleanup
+                        if opponent_ws in player_games:
+                            del player_games[opponent_ws]
                         del games[game_id]
+                        del player_games[ws]
                         
             elif msg.type == aiohttp.WSMsgType.ERROR:
                 print(f'WebSocket error: {ws.exception()}')
@@ -111,15 +118,23 @@ async def websocket_handler(request):
             waiting_player = None
             waiting_player_info = None
         
-        if player_game_id and player_game_id in games:
-            game = games[player_game_id]
-            opponent_color = 'black' if player_color == 'white' else 'white'
-            opponent_ws = game['players'].get(opponent_color)
-            if opponent_ws and not opponent_ws.closed:
-                await opponent_ws.send_json({
-                    'type': 'opponent_disconnected'
-                })
-            del games[player_game_id]
+        player_info = player_games.get(ws)
+        if player_info:
+            game_id = player_info['game_id']
+            player_color = player_info['color']
+            if game_id in games:
+                game = games[game_id]
+                opponent_color = 'black' if player_color == 'white' else 'white'
+                opponent_ws = game['players'].get(opponent_color)
+                if opponent_ws and not opponent_ws.closed:
+                    await opponent_ws.send_json({
+                        'type': 'opponent_disconnected'
+                    })
+                # Clean up opponent's entry
+                if opponent_ws in player_games:
+                    del player_games[opponent_ws]
+                del games[game_id]
+            del player_games[ws]
     
     return ws
 
