@@ -22,8 +22,8 @@ except ImportError:
 class NetworkClient:
     """Client for connecting to the multiplayer server."""
     
-    def __init__(self, server_url):
-        self.server_url = server_url
+    def __init__(self, server_url=None):
+        self.server_url = server_url or SERVER_URL
         self.ws = None
         self.connected = False
         self.game_id = None

@@ -23,10 +23,13 @@ BOARD_DARK = (55, 50, 65)       # Deep charcoal purple
 class ChessGame:
     """Main chess game class handling rendering and game flow."""
     
-    def __init__(self, screen, game_mode='human', difficulty=None):
+    def __init__(self, screen, game_mode='human', difficulty=None, network_client=None, player_color=None):
         self.screen = screen
         self.game_mode = game_mode
         self.difficulty = difficulty
+        self.network_client = network_client
+        self.player_color = player_color  # 'white' or 'black' for online
+        self.opponent_name = None
         
         self.clock = pygame.time.Clock()
         self.running = True
@@ -46,6 +49,16 @@ class ChessGame:
         
         # Animation
         self.time = 0
+        
+        # Online mode state
+        self.opponent_disconnected = False
+        self.pending_opponent_move = None
+        
+        # Set up network callbacks for online mode
+        if self.network_client:
+            self.network_client.on_opponent_move = self._on_opponent_move
+            self.network_client.on_opponent_disconnect = self._on_opponent_disconnect
+            self.network_client.on_opponent_resign = self._on_opponent_resign
     
     def update_dimensions(self):
         """Update dimensions based on current screen size."""
@@ -169,6 +182,12 @@ class ChessGame:
         if self.game_mode == 'ai' and self.current_turn == BLACK:
             return
         
+        # In online mode, only allow moves when it's your turn
+        if self.game_mode == 'online':
+            my_color = WHITE if self.player_color == 'white' else BLACK
+            if self.current_turn != my_color:
+                return
+        
         board_pos = self.get_board_pos(pos)
         if board_pos is None:
             return
@@ -215,6 +234,10 @@ class ChessGame:
         if self.game_mode == 'ai' and self.current_turn == BLACK and not self.game_over:
             self.ai_thinking = True
             self.ai_move_timer = pygame.time.get_ticks()
+        
+        # In online mode, send move to server
+        if self.game_mode == 'online' and self.network_client:
+            self.network_client.send_move(from_row, from_col, to_row, to_col)
     
     def update_ai(self):
         """Handle AI move if it's AI's turn."""
@@ -229,6 +252,45 @@ class ChessGame:
             self.make_move(move[0], move[1], move[2], move[3])
         
         self.ai_thinking = False
+    
+    def _on_opponent_move(self, move):
+        """Callback when opponent makes a move."""
+        self.pending_opponent_move = move
+    
+    def _on_opponent_disconnect(self):
+        """Callback when opponent disconnects."""
+        self.opponent_disconnected = True
+        self.game_over = True
+        self.game_result = "Opponent disconnected!"
+    
+    def _on_opponent_resign(self):
+        """Callback when opponent resigns."""
+        self.game_over = True
+        my_color = 'White' if self.player_color == 'white' else 'Black'
+        self.game_result = f"Opponent resigned! {my_color} wins!"
+    
+    def update_online(self):
+        """Handle incoming opponent moves in online mode."""
+        if self.pending_opponent_move and not self.game_over:
+            move = self.pending_opponent_move
+            self.pending_opponent_move = None
+            # Apply opponent's move directly (don't send back to server)
+            from_row, from_col, to_row, to_col = move
+            is_capture = self.board.make_move(from_row, from_col, to_row, to_col)
+            
+            if is_capture and 'capture' in self.sounds:
+                self.sounds['capture'].play()
+            elif 'move' in self.sounds:
+                self.sounds['move'].play()
+            
+            self.last_move = (from_row, from_col, to_row, to_col)
+            self.move_history.append(self.last_move)
+            self.current_turn = BLACK if self.current_turn == WHITE else WHITE
+            self.in_check = self.board.is_in_check(self.current_turn)
+            self.check_game_over()
+            
+            self.selected_square = None
+            self.valid_moves = []
     
     def check_game_over(self):
         """Check if the game is over."""
@@ -408,12 +470,26 @@ class ChessGame:
         y_offset = self.panel_y + padding
         
         # Game mode indicator
-        mode_text = "vs AI" if self.game_mode == 'ai' else "vs Human"
-        if self.game_mode == 'ai' and self.difficulty:
-            mode_text += f" ({self.difficulty.capitalize()})"
-        mode_surface = self.small_font.render(mode_text, True, (120, 115, 130))
-        self.screen.blit(mode_surface, (content_x, y_offset))
-        y_offset += 35
+        if self.game_mode == 'online':
+            opponent = self.opponent_name or 'Opponent'
+            mode_text = f"Online vs {opponent}"
+            color_text = f"(You are {self.player_color.capitalize()})"
+            mode_surface = self.small_font.render(mode_text, True, (120, 115, 130))
+            self.screen.blit(mode_surface, (content_x, y_offset))
+            y_offset += 20
+            color_surface = self.small_font.render(color_text, True, (100, 180, 100))
+            self.screen.blit(color_surface, (content_x, y_offset))
+            y_offset += 25
+        elif self.game_mode == 'ai':
+            mode_text = f"vs AI ({self.difficulty.capitalize()})" if self.difficulty else "vs AI"
+            mode_surface = self.small_font.render(mode_text, True, (120, 115, 130))
+            self.screen.blit(mode_surface, (content_x, y_offset))
+            y_offset += 35
+        else:
+            mode_text = "vs Human"
+            mode_surface = self.small_font.render(mode_text, True, (120, 115, 130))
+            self.screen.blit(mode_surface, (content_x, y_offset))
+            y_offset += 35
         
         # Current turn or game result
         if self.game_over:
@@ -544,6 +620,8 @@ class ChessGame:
             
             if self.game_mode == 'ai':
                 self.update_ai()
+            elif self.game_mode == 'online':
+                self.update_online()
             
             self.draw()
             pygame.display.flip()
